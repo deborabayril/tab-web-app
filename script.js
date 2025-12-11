@@ -827,20 +827,17 @@ function rollDiceVsPlayer2() {
 
 function rollDiceVsAI() {
     let value = 0;
+    let stickResults = [];
 
     disableRollDiceButton(); // previne que o jogador lance os dados novamente
 
     for (let i = 1; i <= 4; i++) {
         let random = Math.floor(Math.random() * 2);
-        const dice = document.getElementById("dice" + i);
         value += random;
-
-        if (random == 0) {
-            dice.style.backgroundColor = "rgb(49, 26, 2)";
-        } else {
-            dice.style.backgroundColor = "rgb(224, 167, 105)";
-        }
+        stickResults.push(random); // Guarda o resultado para desenhar
     }
+    
+    drawCanvasDice(stickResults); // Para desenhar os paus com Canva API
 
     if (value == 0) { value = 6; }
 
@@ -904,9 +901,7 @@ function resetDice() {
     document.getElementById("diceCombinationValueDisplay").textContent = "";
     document.getElementById("diceCombinationValueName").textContent = "";
     
-    for (let i = 1; i <= 4; i++) {
-        document.getElementById("dice" + i).style.backgroundColor = "rgb(49, 26, 2)";    
-    }
+    drawCanvasDice([0, 0, 0, 0]);
 }
 
 function forfeit() {
@@ -1113,13 +1108,7 @@ function handleServerRollDice(stickValues, value, keepPlaying) {
     document.getElementById("diceCombinationValueName").textContent = diceValueName(value);
     addNewMessage(diceValueName(value) + " " + getPlayerNick(currentPlayer) + " rolled a " + value);
 
-    for (let i = 1; i <= 4; i++) {
-        if (stickValues[i - 1]) {
-            document.getElementById("dice" + i).style.backgroundColor = "rgb(224, 167, 105)";
-        } else {
-            document.getElementById("dice" + i).style.backgroundColor = "rgb(49, 26, 2)";
-        }
-    }
+    drawCanvasDice(stickValues);
 
     if (currentPlayer == getPlayerColor(nick)) {
         let validPiecesToMove = [];
@@ -1468,4 +1457,63 @@ function addRankRow(nick, wins, totalGames) {
 
     return p;
 }
+/* === IMPLEMENTAÇÃO CANVAS API === 
+   Desenha os 4 paus baseados num array de valores (0 ou 1)
+*/
 
+function drawCanvasDice(stickValues) {
+    const canvas = document.getElementById('diceCanvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const stickWidth = 40;
+    const stickHeight = 10;
+    const gap = 15;
+    const startX = (canvas.width - (4 * stickWidth + 3 * gap)) / 2;
+    const startY = (canvas.height - 100) / 2; 
+
+    stickValues.forEach((val, index) => {
+        const x = startX + index * (stickWidth + gap);
+        const y = 20; 
+        
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        drawRoundedRect(ctx, x + 2, y + 2, stickWidth, 80, 5);
+
+        if (val === 1 || val === true) {
+            ctx.fillStyle = "rgb(224, 167, 105)"; 
+            ctx.strokeStyle = "#5d4037";
+        } else {
+            ctx.fillStyle = "rgb(49, 26, 2)"; 
+            ctx.strokeStyle = "#000";
+        }
+
+        drawRoundedRect(ctx, x, y, stickWidth, 80, 5);
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        if (val === 1 || val === true) {
+            ctx.beginPath();
+            ctx.moveTo(x + 10, y + 10);
+            ctx.lineTo(x + 10, y + 70);
+            ctx.strokeStyle = "rgba(255,255,255,0.4)";
+            ctx.stroke();
+        }
+    });
+}
+
+function drawRoundedRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
