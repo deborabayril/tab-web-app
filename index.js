@@ -1,11 +1,11 @@
 const http = require("http");
 const fs = require("fs");
 const crypto = require("crypto");
+const url = require('url');
 
 const PORT = 8140;
 const USERS_FILE = "users.json";
 const RANKINGS_FILE = "rankings.json";
-
 const onGoingGamesMap = new Map();
 const pendingGamesMap = new Map();
 
@@ -26,9 +26,20 @@ class Game {
         this.group = group;
         this.size = size;
         this.winner = null;
-        this.pieces = [];
+        this.board = [
+	        new Array(size).fill(1), 
+            new Array(size).fill(0), 
+            new Array(size).fill(0), 
+            new Array(size).fill(2)
+];      
         this.createdAt = new Date();
         this.gameID = this.generateGameID();
+        this.turn = player1Nick;
+
+	    this.lastRoll = null; 
+        this.waitingForMove = false; 
+
+        this.listeners = [];
     }
 
     generateGameID() {
@@ -39,13 +50,40 @@ class Game {
         });
 
         return crypto.createHash('md5').update(hashInput).digest('hex');
-    }    
+    }   
+    
+    notifyListeners() {
+        const data = JSON.stringify({
+            winner: this.winner,
+            board: this.board,
+            turn: this.turn,
+            lastRoll: this.lastRoll
+        });
+        this.listeners.forEach(res => res.write(`data: ${data}\n\n`));
+    }
+    
+    addPlayer(nick) {
+        this.player2Nick = nick;
+        this.notifyListeners();
+    }
+
 }
 
 const server = http.createServer((request, response) => {
-    response.setHeader("Content-Type", "application/json");
+    const parsedUrl = url.parse(request.url, true);
+    const pathname = parsedUrl.pathname;
+    
+    response.setHeader("Access-Control-Allow-Origin", "*");
 
-    switch (request.url) {
+    if (pathname === '/notify') {
+        response.setHeader("Content-Type", "text/event-stream");
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Connection", "keep-alive");
+    } else {
+        response.setHeader("Content-Type", "application/json");
+    }
+
+    switch (pathname) {
         case "/register":
             console.log("Handling Register");
             handleRegister(request, response);
@@ -64,10 +102,28 @@ const server = http.createServer((request, response) => {
         case "/ranking":
             handleRanking(request, response);
             break;
+        
+        case "/roll":
+            console.log("Handling Roll");
+            handleRoll(request, response);
+            break;
+
+        case "/pass":
+            console.log("Handling Pass");
+            handlePass(request, response);
+            break;
+
+        case "/update":
+            handleUpdate(request, response, parsedUrl.query);
+            break;
+
+        case "/notify":
+            handleNotify(request, response, parsedUrl.query);
+            break;
 
         default:
             response.statusCode = 404;
-            response.end(JSON.stringify({ error: "Unknown POST request" }));
+            response.end(JSON.stringify({ error: "Unknown request" }));
     }
 });
 
@@ -263,11 +319,11 @@ function handleJoin(request, response) {
             gameID = game.gameID;
 
             if (game.player1Nick != nick) {
-                game.player2Nick = nick;
                 console.log("Matching game found: " + JSON.stringify(game));
                 // Initialize game board for /update
                 onGoingGamesMap.set(gameID, game);
                 pendingGamesMap.delete(key);
+                game.addPlayer(nick);
             } else {
                 response.statusCode = 400;
                 return response.end(JSON.stringify({ error: nick + " is already in queue" }));
@@ -378,3 +434,141 @@ function isInteger(v) {
 function hashPassword(password) {
     return crypto.createHash("sha256").update(password).digest("hex");
 }
+
+function handleNotify(request, response, query) {
+    const nick = query.nick;
+    const password = query.password;
+    const gameID = query.game;
+
+    if (!gameID) {
+        response.statusCode = 400;
+        return response.end(JSON.stringify({ error: "Missing gameID" }));
+    }
+
+    let game = onGoingGamesMap.get(gameID);
+    
+    if (!game) {
+        for (const g of pendingGamesMap.values()) {
+            if (g.gameID === gameID) { game = g; break; }
+        }
+    }
+
+    if (!game) {
+        response.statusCode = 404;
+        return response.end(JSON.stringify({ error: "Game not found" }));
+    }
+
+    response.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+    });
+
+    game.listeners.push(response);
+
+    request.on('close', () => {
+        game.listeners = game.listeners.filter(res => res !== response);
+    });
+}
+
+function handleUpdate(request, response, query) {
+    const gameID = query.game;
+    const nick = query.nick;
+
+    if (!gameID) {
+        response.statusCode = 400;
+        return response.end(JSON.stringify({ error: "Game ID missing" }));
+    }
+
+    const game = onGoingGamesMap.get(gameID);
+    if (!game) {
+        response.statusCode = 404;
+        return response.end(JSON.stringify({ error: "Game not active" }));
+    }
+
+    response.end(JSON.stringify({
+        board: game.board,
+        turn: game.turn,
+        winner: game.winner,
+        lastRoll: game.lastRoll
+    }));
+}
+
+function handleRoll(request, response) {
+    let body = "";
+    request.on("data", chunk => (body += chunk));
+    request.on("end", () => {
+        let data;
+        try { data = JSON.parse(body); } catch { return response.end(JSON.stringify({ error: "Invalid JSON" })); }
+
+        const { nick, password, game: gameID } = data;
+        const users = JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+
+        if (!users[nick] || users[nick] !== hashPassword(password)) {
+            response.statusCode = 401;
+            return response.end(JSON.stringify({ error: "Unauthorized" }));
+        }
+
+        const game = onGoingGamesMap.get(gameID);
+        if (!game) {
+            response.statusCode = 404;
+            return response.end(JSON.stringify({ error: "Game not found" }));
+        }
+
+        if (game.turn !== nick) {
+            response.statusCode = 400;
+            return response.end(JSON.stringify({ error: "Not your turn" }));
+        }
+
+        let sticks = 0;
+        for(let i=0; i<4; i++) {
+            if (Math.random() > 0.5) sticks++; 
+        }
+
+        let rollValue = 0;
+        switch (sticks) {
+            case 0: rollValue = 6; break; 
+            case 1: rollValue = 1; break; 
+            case 2: rollValue = 2; break; 
+            case 3: rollValue = 3; break; 
+            case 4: rollValue = 4; break; 
+        }
+
+        game.lastRoll = { player: nick, sticks: sticks, value: rollValue };
+                
+        game.notifyListeners(); 
+
+        response.end(JSON.stringify({ value: rollValue }));
+    });
+}
+
+function handlePass(request, response) {
+    let body = "";
+    request.on("data", chunk => (body += chunk));
+    request.on("end", () => {
+        let data;
+        try { data = JSON.parse(body); } catch { return response.end(JSON.stringify({ error: "Invalid JSON" })); }
+
+        const { nick, password, game: gameID } = data;
+        const users = JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+
+        if (!users[nick] || users[nick] !== hashPassword(password)) {
+            response.statusCode = 401;
+            return response.end(JSON.stringify({ error: "Unauthorized" }));
+        }
+
+        const game = onGoingGamesMap.get(gameID);
+        if (!game || game.turn !== nick) {
+            response.statusCode = 400;
+            return response.end(JSON.stringify({ error: "Error passing turn" }));
+        }
+
+        game.turn = (game.turn === game.player1Nick) ? game.player2Nick : game.player1Nick;
+        game.lastRoll = null;
+        
+        game.notifyListeners();
+
+        response.end(JSON.stringify({ message: "Turn passed" }));
+    });
+}
+
